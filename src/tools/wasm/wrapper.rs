@@ -232,8 +232,8 @@ impl WasiView for StoreData {
 
 // Implement the generated Host trait from bindgen.
 //
-// This registers all 6 host functions under the `near:agent/host` namespace:
-// log, now-millis, workspace-read, http-request, secret-exists, tool-invoke
+// This registers all 8 host functions under the `near:agent/host` namespace:
+// log, now-millis, workspace-read, http-request, secret-exists, tool-invoke, pubkey-for, sign-bytes
 impl near::agent::host::Host for StoreData {
     fn log(&mut self, level: near::agent::host::LogLevel, message: String) {
         let log_level = match level {
@@ -450,6 +450,53 @@ impl near::agent::host::Host for StoreData {
 
     fn secret_exists(&mut self, name: String) -> bool {
         self.host_state.secret_exists(&name)
+    }
+
+    fn pubkey_for(&mut self, key_name: String) -> Option<String> {
+        if !self.host_state.secret_exists(&key_name) {
+            return None;
+        }
+        let secret_value = self.credentials.get(&key_name)?;
+        let key_bytes = bs58::decode(secret_value).into_vec().ok()?;
+        if key_bytes.len() != 64 {
+            tracing::debug!(
+                key_name = %key_name,
+                len = key_bytes.len(),
+                "pubkey_for: expected 64-byte keypair"
+            );
+            return None;
+        }
+        Some(bs58::encode(&key_bytes[32..64]).into_string())
+    }
+
+    fn sign_bytes(
+        &mut self,
+        key_name: String,
+        message: Vec<u8>,
+    ) -> Result<Vec<u8>, String> {
+        if !self.host_state.secret_exists(&key_name) {
+            return Err(format!("secret '{}' not accessible", key_name));
+        }
+        let secret_value = self
+            .credentials
+            .get(&key_name)
+            .ok_or_else(|| format!("secret '{}' not found", key_name))?;
+        let key_bytes = bs58::decode(secret_value)
+            .into_vec()
+            .map_err(|e| format!("bs58 decode failed: {e}"))?;
+        if key_bytes.len() < 32 {
+            return Err(format!(
+                "keypair too short: expected >=32 bytes, got {}",
+                key_bytes.len()
+            ));
+        }
+        let seed: [u8; 32] = key_bytes[..32]
+            .try_into()
+            .map_err(|_| "seed extraction failed".to_string())?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        use ed25519_dalek::Signer;
+        let signature = signing_key.sign(&message);
+        Ok(signature.to_bytes().to_vec())
     }
 }
 
