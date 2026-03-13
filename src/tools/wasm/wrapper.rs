@@ -910,6 +910,32 @@ impl Tool for WasmToolWrapper {
         )
         .await;
 
+        // Pre-load secrets declared in capabilities.secrets.allowed_names into the
+        // credentials map so that sign_bytes / pubkey_for host functions can access
+        // them synchronously during WASM execution.
+        //
+        // These are raw secret values (e.g. base58-encoded keypairs), distinct from
+        // the HTTP host credentials resolved above which are only for header injection.
+        let mut credentials = self.credentials.clone();
+        if let Some(ref secrets_cap) = self.capabilities.secrets {
+            if let Some(store) = self.secrets_store.as_deref() {
+                for name in &secrets_cap.allowed_names {
+                    match store.get_decrypted(credential_user_id, name).await {
+                        Ok(decrypted) => {
+                            credentials.insert(name.clone(), decrypted.expose().to_string());
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                secret_name = %name,
+                                error = %e,
+                                "Could not pre-load signing secret (may not be provisioned yet)"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // Serialize context for WASM
         let context_json = serde_json::to_string(ctx).ok();
 
@@ -919,7 +945,6 @@ impl Tool for WasmToolWrapper {
         let capabilities = self.capabilities.clone();
         let description = self.description.clone();
         let schemas = self.schemas.clone();
-        let credentials = self.credentials.clone();
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
